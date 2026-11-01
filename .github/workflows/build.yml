@@ -747,6 +747,4 @@ jobs:
       - name: Publish APK to Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: maya-${{ github.run_number }}
-          name: Maya build ${{ github.run_number }}
-          files: mayaapp/app/build/outputs/apk/debug/app-debug.apk
+          tag_name: maya
