@@ -1,0 +1,752 @@
+name: Build Maya APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate Maya project
+        run: |
+          mkdir -p mayaapp/app
+          cat > mayaapp/app/build.gradle.kts <<'MAYA_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.maya.assistant"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.maya.assistant"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          MAYA_EOF
+          mkdir -p mayaapp/app/src/main
+          cat > mayaapp/app/src/main/AndroidManifest.xml <<'MAYA_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+              <uses-permission android:name="android.permission.CALL_PHONE" />
+              <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+              <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+              <uses-permission android:name="android.permission.READ_CONTACTS" />
+              <uses-permission android:name="android.permission.SEND_SMS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.TTS_SERVICE" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:label="Maya"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".MayaService"
+                      android:exported="false"
+                      android:foregroundServiceType="microphone" />
+              </application>
+          </manifest>
+          MAYA_EOF
+          mkdir -p mayaapp/app/src/main/java/com/maya/assistant
+          cat > mayaapp/app/src/main/java/com/maya/assistant/MainActivity.kt <<'MAYA_EOF'
+          package com.maya.assistant
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+
+              private lateinit var toggle: Button
+              private lateinit var status: TextView
+              private lateinit var keyBox: EditText
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val d = resources.displayMetrics.density
+                  val pad = (20 * d).toInt()
+
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(pad, pad * 2, pad, pad)
+                  root.setBackgroundColor(Color.parseColor("#0B1220"))
+
+                  val title = TextView(this)
+                  title.text = "MAYA"
+                  title.textSize = 34f
+                  title.setTextColor(Color.WHITE)
+                  title.gravity = Gravity.CENTER
+
+                  keyBox = EditText(this)
+                  keyBox.hint = "API Key (Gemini অথবা Claude)"
+                  keyBox.setTextColor(Color.WHITE)
+                  keyBox.setHintTextColor(Color.GRAY)
+                  keyBox.isSingleLine = true
+                  keyBox.setText(getSharedPreferences("maya", 0).getString("key", ""))
+
+                  val perm = Button(this)
+                  perm.text = "১. পারমিশন দিন"
+                  perm.setOnClickListener { askPerms() }
+
+                  toggle = Button(this)
+                  toggle.setOnClickListener { toggleService() }
+
+                  status = TextView(this)
+                  status.setTextColor(Color.LTGRAY)
+                  status.textSize = 15f
+
+                  val tip = TextView(this)
+                  tip.text = "টিপ: ফোনের সেটিংস > অ্যাপস > Maya > ব্যাটারি > Unrestricted করে দিন, নাহলে ব্যাকগ্রাউন্ডে বন্ধ হয়ে যাবে।"
+                  tip.setTextColor(Color.GRAY)
+                  tip.textSize = 13f
+
+                  root.addView(title)
+                  root.addView(keyBox)
+                  root.addView(perm)
+                  root.addView(toggle)
+                  root.addView(status)
+                  root.addView(tip)
+
+                  val sv = ScrollView(this)
+                  sv.addView(root)
+                  setContentView(sv)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  refresh()
+              }
+
+              private fun refresh() {
+                  if (MayaService.alive) {
+                      toggle.text = "■ মায়া বন্ধ করুন"
+                      status.text = "মায়া শুনছে। বলুন: \"হে মায়া\""
+                  } else {
+                      toggle.text = "▶ ২. মায়া চালু করুন"
+                      status.text = "মায়া বন্ধ আছে।"
+                  }
+              }
+
+              private fun askPerms() {
+                  val list = arrayListOf(
+                      Manifest.permission.RECORD_AUDIO,
+                      Manifest.permission.CALL_PHONE,
+                      Manifest.permission.READ_CONTACTS,
+                      Manifest.permission.SEND_SMS,
+                      Manifest.permission.ANSWER_PHONE_CALLS,
+                      Manifest.permission.READ_PHONE_STATE
+                  )
+                  if (Build.VERSION.SDK_INT >= 33) list.add(Manifest.permission.POST_NOTIFICATIONS)
+                  requestPermissions(list.toTypedArray(), 1)
+              }
+
+              override fun onRequestPermissionsResult(code: Int, p: Array<out String>, r: IntArray) {
+                  super.onRequestPermissionsResult(code, p, r)
+                  if (!Settings.canDrawOverlays(this)) {
+                      startActivity(
+                          Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + packageName))
+                      )
+                  }
+              }
+
+              private fun toggleService() {
+                  if (MayaService.alive) {
+                      startService(Intent(this, MayaService::class.java).setAction("STOP"))
+                  } else {
+                      if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                          status.text = "আগে \"পারমিশন দিন\" চাপুন।"
+                          return
+                      }
+                      getSharedPreferences("maya", 0).edit()
+                          .putString("key", keyBox.text.toString().trim()).apply()
+                      startForegroundService(Intent(this, MayaService::class.java))
+                  }
+                  toggle.postDelayed({ refresh() }, 700)
+              }
+          }
+          MAYA_EOF
+          mkdir -p mayaapp/app/src/main/java/com/maya/assistant
+          cat > mayaapp/app/src/main/java/com/maya/assistant/MayaService.kt <<'MAYA_EOF'
+          package com.maya.assistant
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.hardware.camera2.CameraManager
+          import android.media.AudioManager
+          import android.net.Uri
+          import android.os.BatteryManager
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.provider.ContactsContract
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import android.telecom.TelecomManager
+          import android.telephony.SmsManager
+          import android.util.Log
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.net.URLEncoder
+          import java.util.Locale
+
+          class MayaService : Service() {
+
+              companion object {
+                  @Volatile
+                  var alive = false
+
+                  // যদি মডেল বন্ধ হয়ে যায়, শুধু এই নামগুলো বদলান
+                  const val CLAUDE_MODEL = "claude-haiku-5-5"
+                  const val GEMINI_MODEL = "gemini-2.5-flash"
+
+                  val WAKE = listOf("maya", "মায়া", "মাইয়া", "মায়্যা")
+
+                  val APPS = mapOf(
+                      "youtube" to "com.google.android.youtube",
+                      "whatsapp" to "com.whatsapp",
+                      "facebook" to "com.facebook.katana",
+                      "messenger" to "com.facebook.orca",
+                      "chrome" to "com.android.chrome",
+                      "gmail" to "com.google.android.gm",
+                      "maps" to "com.google.android.apps.maps",
+                      "telegram" to "org.telegram.messenger",
+                      "settings" to "com.android.settings"
+                  )
+
+                  const val SYSTEM = """You are Maya, a voice assistant on an Android phone. The user speaks Bengali or English.
+          Reply with ONLY one JSON object, no other text:
+          {"action": "...", "args": {...}, "say": "short spoken reply in the user's language"}
+          Actions:
+          - call {name}              call a contact by name
+          - answer_call {}           answer the ringing incoming call
+          - end_call {}              hang up / reject the call
+          - sms {name, text}         send an SMS
+          - youtube_play {query}     open YouTube search for a song or video
+          - youtube_search {query}
+          - open_app {app}           app name, e.g. whatsapp, camera, facebook
+          - web_search {query}
+          - torch {on: true/false}
+          - volume {level: 0-15}
+          - battery {}
+          - stop {}                  stop the assistant
+          - chat {}                  just talk; put the answer in "say"
+          Keep "say" under 2 short sentences. If unclear, use chat and ask a short question."""
+              }
+
+              private val main = Handler(Looper.getMainLooper())
+              private var recognizer: SpeechRecognizer? = null
+              private var tts: TextToSpeech? = null
+              private var ttsReady = false
+              private var speaking = false
+              private var busy = false
+              private var awaiting = false
+              private var errCount = 0
+              private val history = ArrayList<Pair<String, String>>()
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent?.action == "STOP") {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  startFg()
+                  if (!alive) {
+                      alive = true
+                      initTts()
+                      main.post { listen() }
+                  }
+                  return START_STICKY
+              }
+
+              override fun onDestroy() {
+                  alive = false
+                  main.removeCallbacksAndMessages(null)
+                  try { recognizer?.destroy() } catch (e: Exception) { }
+                  tts?.shutdown()
+                  super.onDestroy()
+              }
+
+              private fun startFg() {
+                  val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                  nm.createNotificationChannel(NotificationChannel("maya", "Maya", NotificationManager.IMPORTANCE_LOW))
+                  val n = Notification.Builder(this, "maya")
+                      .setContentTitle("মায়া চালু আছে")
+                      .setContentText("বলুন: হে মায়া")
+                      .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                      .build()
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                  } else {
+                      startForeground(1, n)
+                  }
+              }
+
+              // ---------- কথা বলা ----------
+              private fun initTts() {
+                  tts = TextToSpeech(this) { st ->
+                      if (st == TextToSpeech.SUCCESS) {
+                          val r = tts!!.setLanguage(Locale("bn", "BD"))
+                          if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) {
+                              tts!!.setLanguage(Locale.US)
+                          }
+                          tts!!.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                              override fun onStart(id: String?) {}
+                              override fun onDone(id: String?) {
+                                  speaking = false
+                                  main.post { listen() }
+                              }
+                              override fun onError(id: String?) {
+                                  speaking = false
+                                  main.post { listen() }
+                              }
+                          })
+                          ttsReady = true
+                      }
+                  }
+              }
+
+              private fun say(t: String) {
+                  Log.d("Maya", t)
+                  if (!ttsReady) {
+                      listen()
+                      return
+                  }
+                  speaking = true
+                  try { recognizer?.cancel() } catch (e: Exception) { }
+                  tts?.speak(t, TextToSpeech.QUEUE_FLUSH, null, "m" + System.nanoTime())
+              }
+
+              // ---------- শোনা ----------
+              private fun listen() {
+                  if (!alive || speaking || busy) return
+                  if (!SpeechRecognizer.isRecognitionAvailable(this)) return
+                  try { recognizer?.destroy() } catch (e: Exception) { }
+                  val rec = SpeechRecognizer.createSpeechRecognizer(this)
+                  recognizer = rec
+                  rec.setRecognitionListener(object : RecognitionListener {
+                      override fun onReadyForSpeech(p: Bundle?) {}
+                      override fun onBeginningOfSpeech() {}
+                      override fun onRmsChanged(v: Float) {}
+                      override fun onBufferReceived(b: ByteArray?) {}
+                      override fun onEndOfSpeech() {}
+                      override fun onPartialResults(p: Bundle?) {}
+                      override fun onEvent(t: Int, p: Bundle?) {}
+                      override fun onError(e: Int) {
+                          if (e == SpeechRecognizer.ERROR_NO_MATCH || e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                              awaiting = false
+                          }
+                          errCount++
+                          val delay = if (errCount > 5) 4000L else if (e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 1500L else 400L
+                          main.postDelayed({ listen() }, delay)
+                      }
+                      override fun onResults(b: Bundle?) {
+                          errCount = 0
+                          val l = b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                          handle(l?.firstOrNull() ?: "")
+                      }
+                  })
+                  val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "bn-BD")
+                  i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+                  rec.startListening(i)
+              }
+
+              private fun handle(text: String) {
+                  if (text.isBlank()) {
+                      listen()
+                      return
+                  }
+                  var cmd: String
+                  if (awaiting) {
+                      awaiting = false
+                      cmd = text
+                  } else {
+                      val low = text.lowercase(Locale.ROOT)
+                      if (WAKE.none { low.contains(it) }) {
+                          listen()
+                          return
+                      }
+                      cmd = low
+                      for (w in WAKE) cmd = cmd.replace(w, " ")
+                      cmd = cmd.trim().removePrefix("hey").removePrefix("হে").trim().trim(',', '।', '.', ' ')
+                      if (cmd.isEmpty()) {
+                          awaiting = true
+                          say("জি, বলুন।")
+                          return
+                      }
+                  }
+                  busy = true
+                  Thread {
+                      val plan = askAi(cmd)
+                      main.post {
+                          busy = false
+                          act(plan)
+                      }
+                  }.start()
+              }
+
+              // ---------- কাজ করা ----------
+              private fun act(plan: JSONObject) {
+                  val a = plan.optString("action", "chat")
+                  val g = plan.optJSONObject("args") ?: JSONObject()
+                  val s = plan.optString("say", "")
+                  when (a) {
+                      "call" -> {
+                          val c = findContact(g.optString("name"))
+                          if (c == null) say("এই নামে কাউকে পেলাম না।") else placeCall(c.second)
+                      }
+                      "answer_call" -> {
+                          try {
+                              (getSystemService(Context.TELECOM_SERVICE) as TelecomManager).acceptRingingCall()
+                          } catch (e: Exception) { Log.e("Maya", "answer", e) }
+                      }
+                      "end_call" -> {
+                          try {
+                              if (Build.VERSION.SDK_INT >= 28) {
+                                  (getSystemService(Context.TELECOM_SERVICE) as TelecomManager).endCall()
+                              }
+                          } catch (e: Exception) { Log.e("Maya", "end", e) }
+                      }
+                      "sms" -> {
+                          val c = findContact(g.optString("name"))
+                          if (c == null) {
+                              say("কন্টাক্ট পেলাম না।")
+                          } else {
+                              sendSms(c.second, g.optString("text"))
+                              say(s.ifEmpty { "মেসেজ পাঠিয়েছি।" })
+                          }
+                      }
+                      "youtube_play", "youtube_search" -> {
+                          ytSearch(g.optString("query"))
+                          if (s.isNotEmpty()) say(s)
+                      }
+                      "open_app" -> {
+                          if (openApp(g.optString("app"))) {
+                              if (s.isNotEmpty()) say(s)
+                          } else say("এই অ্যাপটা পেলাম না।")
+                      }
+                      "web_search" -> {
+                          startAct(Intent(Intent.ACTION_VIEW, Uri.parse(
+                              "https://www.google.com/search?q=" + URLEncoder.encode(g.optString("query"), "UTF-8"))))
+                          if (s.isNotEmpty()) say(s)
+                      }
+                      "torch" -> {
+                          try {
+                              val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                              cm.setTorchMode(cm.cameraIdList[0], g.optBoolean("on", true))
+                          } catch (e: Exception) { Log.e("Maya", "torch", e) }
+                          if (s.isNotEmpty()) say(s)
+                      }
+                      "volume" -> {
+                          val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                          val lv = g.optInt("level", 8).coerceIn(0, am.getStreamMaxVolume(AudioManager.STREAM_MUSIC))
+                          am.setStreamVolume(AudioManager.STREAM_MUSIC, lv, 0)
+                          if (s.isNotEmpty()) say(s)
+                      }
+                      "battery" -> {
+                          val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+                          val p = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+                          say("ব্যাটারি $p শতাংশ।")
+                      }
+                      "stop" -> {
+                          say("বিদায়।")
+                          main.postDelayed({ stopSelf() }, 2000)
+                      }
+                      else -> say(if (s.isEmpty()) "বলুন।" else s)
+                  }
+                  if (!speaking) listen()
+              }
+
+              private fun startAct(i: Intent): Boolean {
+                  return try {
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      startActivity(i)
+                      true
+                  } catch (e: Exception) {
+                      Log.e("Maya", "startAct", e)
+                      false
+                  }
+              }
+
+              private fun placeCall(num: String) {
+                  try {
+                      val tm = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+                      tm.placeCall(Uri.fromParts("tel", num, null), Bundle())
+                  } catch (e: Exception) {
+                      startAct(Intent(Intent.ACTION_CALL, Uri.parse("tel:" + Uri.encode(num))))
+                  }
+              }
+
+              @Suppress("DEPRECATION")
+              private fun sendSms(num: String, text: String) {
+                  try {
+                      val sm = if (Build.VERSION.SDK_INT >= 31) getSystemService(SmsManager::class.java) else SmsManager.getDefault()
+                      sm.sendTextMessage(num, null, text, null, null)
+                  } catch (e: Exception) { Log.e("Maya", "sms", e) }
+              }
+
+              private fun ytSearch(q: String) {
+                  val i = Intent(Intent.ACTION_SEARCH).setPackage("com.google.android.youtube").putExtra("query", q)
+                  if (!startAct(i)) {
+                      startAct(Intent(Intent.ACTION_VIEW, Uri.parse(
+                          "https://www.youtube.com/results?search_query=" + URLEncoder.encode(q, "UTF-8"))))
+                  }
+              }
+
+              private fun openApp(name: String): Boolean {
+                  val n = name.lowercase(Locale.ROOT).trim()
+                  if (n.isEmpty()) return false
+                  var pkg: String? = APPS[n]
+                  if (pkg == null) {
+                      val pm = packageManager
+                      val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                      for (ri in pm.queryIntentActivities(launcher, 0)) {
+                          val label = ri.loadLabel(pm).toString().lowercase(Locale.ROOT)
+                          if (label.isNotEmpty() && (label.contains(n) || n.contains(label))) {
+                              pkg = ri.activityInfo.packageName
+                              break
+                          }
+                      }
+                  }
+                  val i = pkg?.let { packageManager.getLaunchIntentForPackage(it) } ?: return false
+                  return startAct(i)
+              }
+
+              private fun findContact(name: String): Pair<String, String>? {
+                  if (name.isBlank()) return null
+                  val t = name.lowercase(Locale.ROOT).trim()
+                  var best: Pair<String, String>? = null
+                  var bestD = Int.MAX_VALUE
+                  try {
+                      val cols = arrayOf(
+                          ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                          ContactsContract.CommonDataKinds.Phone.NUMBER
+                      )
+                      contentResolver.query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI, cols, null, null, null)?.use { c ->
+                          while (c.moveToNext()) {
+                              val n = c.getString(0) ?: continue
+                              val num = c.getString(1) ?: continue
+                              val ln = n.lowercase(Locale.ROOT)
+                              val d = if (ln.contains(t)) 0 else lev(ln, t)
+                              if (d < bestD) {
+                                  bestD = d
+                                  best = Pair(n, num)
+                              }
+                          }
+                      }
+                  } catch (e: Exception) { Log.e("Maya", "contacts", e) }
+                  return if (bestD <= maxOf(2, t.length / 3)) best else null
+              }
+
+              private fun lev(a: String, b: String): Int {
+                  val dp = IntArray(b.length + 1) { it }
+                  for (i in 1..a.length) {
+                      var prev = dp[0]
+                      dp[0] = i
+                      for (j in 1..b.length) {
+                          val tmp = dp[j]
+                          val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                          dp[j] = minOf(dp[j] + 1, dp[j - 1] + 1, prev + cost)
+                          prev = tmp
+                      }
+                  }
+                  return dp[b.length]
+              }
+
+              // ---------- এআই ব্রেন ----------
+              private fun askAi(text: String): JSONObject {
+                  val key = getSharedPreferences("maya", 0).getString("key", "")!!.trim()
+                  if (key.isEmpty()) {
+                      return JSONObject().put("action", "chat").put("say", "আগে অ্যাপে এপিআই কী দিন।")
+                  }
+                  return try {
+                      val msgs = history.takeLast(10) + Pair("user", text)
+                      val out = if (key.startsWith("sk-ant")) claude(key, msgs) else gemini(key, msgs)
+                      history.add(Pair("user", text))
+                      history.add(Pair("assistant", out))
+                      val st = out.indexOf('{')
+                      val en = out.lastIndexOf('}')
+                      if (st >= 0 && en > st) {
+                          JSONObject(out.substring(st, en + 1))
+                      } else {
+                          JSONObject().put("action", "chat").put("say", out.take(200))
+                      }
+                  } catch (e: Exception) {
+                      Log.e("Maya", "ai", e)
+                      JSONObject().put("action", "chat").put("say", "এআই সংযোগে সমস্যা হয়েছে।")
+                  }
+              }
+
+              private fun claude(key: String, msgs: List<Pair<String, String>>): String {
+                  val arr = JSONArray()
+                  for (m in msgs) arr.put(JSONObject().put("role", m.first).put("content", m.second))
+                  val body = JSONObject()
+                      .put("model", CLAUDE_MODEL)
+                      .put("max_tokens", 400)
+                      .put("system", SYSTEM)
+                      .put("messages", arr)
+                  val r = post(
+                      "https://api.anthropic.com/v1/messages", body.toString(),
+                      mapOf("x-api-key" to key, "anthropic-version" to "2023-06-01")
+                  )
+                  return JSONObject(r).getJSONArray("content").getJSONObject(0).getString("text")
+              }
+
+              private fun gemini(key: String, msgs: List<Pair<String, String>>): String {
+                  val contents = JSONArray()
+                  for (m in msgs) {
+                      val role = if (m.first == "user") "user" else "model"
+                      contents.put(
+                          JSONObject().put("role", role)
+                              .put("parts", JSONArray().put(JSONObject().put("text", m.second)))
+                      )
+                  }
+                  val body = JSONObject()
+                      .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", SYSTEM))))
+                      .put("contents", contents)
+                      .put("generationConfig", JSONObject().put("responseMimeType", "application/json"))
+                  val url = "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent?key=" + key
+                  val r = post(url, body.toString(), emptyMap())
+                  return JSONObject(r).getJSONArray("candidates").getJSONObject(0)
+                      .getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
+              }
+
+              private fun post(url: String, body: String, headers: Map<String, String>): String {
+                  val c = URL(url).openConnection() as HttpURLConnection
+                  c.requestMethod = "POST"
+                  c.connectTimeout = 20000
+                  c.readTimeout = 40000
+                  c.doOutput = true
+                  c.setRequestProperty("Content-Type", "application/json")
+                  for ((k, v) in headers) c.setRequestProperty(k, v)
+                  c.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                  val code = c.responseCode
+                  val stream = if (code >= 400) c.errorStream else c.inputStream
+                  val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                  if (code >= 400) throw Exception("HTTP " + code + ": " + text.take(200))
+                  return text
+              }
+          }
+          MAYA_EOF
+          mkdir -p mayaapp
+          cat > mayaapp/build.gradle.kts <<'MAYA_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          MAYA_EOF
+          mkdir -p mayaapp
+          cat > mayaapp/gradle.properties <<'MAYA_EOF'
+          org.gradle.jvmargs=-Xmx3g
+          android.useAndroidX=false
+          kotlin.code.style=official
+          MAYA_EOF
+          mkdir -p mayaapp
+          cat > mayaapp/settings.gradle.kts <<'MAYA_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "Maya"
+          include(":app")
+          MAYA_EOF
+
+      - name: Build APK
+        working-directory: mayaapp
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Publish APK to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: maya-${{ github.run_number }}
+          name: Maya build ${{ github.run_number }}
+          files: mayaapp/app/build/outputs/apk/debug/app-debug.apk
